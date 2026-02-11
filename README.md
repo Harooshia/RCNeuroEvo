@@ -70,6 +70,7 @@ python -m neuroevo.main --population 60 --generations 200 --max-steps 1600 --spe
 - `--no-render`: disables visualization for fast training
 - `--show-sensors`: draws sensor rays for best car
 - `--save-path models/best.weights.h5`: output weights path
+- `--hidden-sizes 24,16`: network hidden sizes used for both training and watch mode
 
 ## Watch best model
 
@@ -122,6 +123,35 @@ If it does **not** point to your current repo checkout, reinstall and retry:
 pip uninstall -y rc-neuroevo neuroevo || true
 pip install -e .
 python -m neuroevo.main --no-render --population 10 --generations 1 --max-steps 50
+```
+
+
+### `ValueError ... variable.shape=(8, 16), Received: value.shape=(8, 24)`
+
+This means the model architecture at load time does not match the saved weights.
+
+Use one of these fixes:
+
+```bash
+# Match the architecture explicitly
+python -m neuroevo.main --load-path models/best.weights.h5 --hidden-sizes 24,16
+```
+
+If the model was produced by this project recently, a sidecar metadata file
+(`.meta.json`) is written automatically and watch mode will use it to pick the
+correct architecture.
+
+### TensorFlow oneDNN logs
+
+Messages like `oneDNN custom operations are on` are informational and not errors.
+If you want to silence that behavior difference warning:
+
+```bash
+# Linux/macOS
+TF_ENABLE_ONEDNN_OPTS=0 python -m neuroevo.main --no-render
+
+# Windows PowerShell
+$env:TF_ENABLE_ONEDNN_OPTS=0; python -m neuroevo.main --no-render
 ```
 
 ## Notes

@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 import argparse
+import json
 import os
 import time
 import tkinter as tk
+from pathlib import Path
 
 import numpy as np
 import tensorflow as tf
@@ -153,6 +155,20 @@ class TkRenderer:
         self.root.update()
 
 
+def parse_hidden_sizes(value: str) -> tuple[int, ...]:
+    """Parse hidden sizes from comma-separated CLI value."""
+    parts = [v.strip() for v in value.split(",") if v.strip()]
+    if not parts:
+        raise argparse.ArgumentTypeError("hidden sizes cannot be empty")
+    try:
+        sizes = tuple(int(v) for v in parts)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError("hidden sizes must be comma-separated integers") from exc
+    if any(s <= 0 for s in sizes):
+        raise argparse.ArgumentTypeError("hidden sizes must be positive")
+    return sizes
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Code Bullet-style neuroevolution racing sim")
     parser.add_argument("--population", type=int, default=60, help="Population size")
@@ -163,6 +179,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--show-sensors", action="store_true", help="Render sensor rays")
     parser.add_argument("--save-path", type=str, default="models/best.weights.h5", help="Where best weights are saved")
     parser.add_argument("--load-path", type=str, default="", help="Load weights and watch single car")
+    parser.add_argument(
+        "--hidden-sizes",
+        type=parse_hidden_sizes,
+        default=(24, 16),
+        help="Hidden layer sizes as comma-separated integers (e.g., 24,16)",
+    )
     parser.add_argument("--seed", type=int, default=42, help="Random seed")
     return parser.parse_args()
 
@@ -172,12 +194,56 @@ def setup_seed(seed: int) -> None:
     tf.random.set_seed(seed)
 
 
-def run_watch_mode(track: Track, weight_path: str, show_sensors: bool) -> None:
+def metadata_path(weight_path: str) -> str:
+    return f"{weight_path}.meta.json"
+
+
+def save_model_metadata(weight_path: str, hidden_sizes: tuple[int, ...], input_size: int) -> None:
+    meta = {"hidden_sizes": list(hidden_sizes), "input_size": int(input_size)}
+    Path(metadata_path(weight_path)).write_text(json.dumps(meta, indent=2), encoding="utf-8")
+
+
+def load_model_metadata(weight_path: str) -> dict | None:
+    p = Path(metadata_path(weight_path))
+    if not p.exists():
+        return None
+    try:
+        return json.loads(p.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+
+
+def resolve_watch_architecture(load_path: str, cli_hidden_sizes: tuple[int, ...]) -> tuple[int, tuple[int, ...]]:
+    """Use sidecar metadata when available to avoid weight-shape mismatch."""
+    meta = load_model_metadata(load_path)
+    if meta is None:
+        return 8, cli_hidden_sizes
+
+    input_size = int(meta.get("input_size", 8))
+    hidden_raw = meta.get("hidden_sizes", list(cli_hidden_sizes))
+    try:
+        hidden_sizes = tuple(int(v) for v in hidden_raw)
+    except (TypeError, ValueError):
+        hidden_sizes = cli_hidden_sizes
+
+    if not hidden_sizes:
+        hidden_sizes = cli_hidden_sizes
+    return input_size, hidden_sizes
+
+
+def run_watch_mode(track: Track, weight_path: str, show_sensors: bool, hidden_sizes: tuple[int, ...]) -> None:
     renderer = TkRenderer(track.width, track.height, title="Neuroevolution Racing (Watch)")
 
-    input_size = 8
-    net = NeuralNetwork(input_size=input_size)
-    net.load_weights(weight_path)
+    input_size, watch_hidden = resolve_watch_architecture(weight_path, hidden_sizes)
+    net = NeuralNetwork(input_size=input_size, hidden_sizes=watch_hidden)
+    try:
+        net.load_weights(weight_path)
+    except ValueError as exc:
+        raise ValueError(
+            "Failed to load weights due to architecture mismatch. "
+            f"Tried hidden sizes {watch_hidden}. "
+            "Use --hidden-sizes to match training architecture or retrain with current defaults."
+        ) from exc
 
     car = Car(x=float(track.start_position[0]), y=float(track.start_position[1]), angle=track.start_angle)
 
@@ -218,7 +284,7 @@ def run_training(args: argparse.Namespace) -> None:
         elite_fraction=0.2,
         mutation_rate=0.1,
         mutation_scale=0.08,
-        hidden_sizes=(24, 16),
+        hidden_sizes=args.hidden_sizes,
     )
 
     os.makedirs(os.path.dirname(args.save_path) or ".", exist_ok=True)
@@ -259,7 +325,8 @@ def run_training(args: argparse.Namespace) -> None:
 
         stats = ga.evolve()
         global_best = max(global_best, stats["best_fitness"])
-        ga.save_best(args.save_path)
+        if ga.save_best(args.save_path):
+            save_model_metadata(args.save_path, args.hidden_sizes, input_size=8)
 
         elapsed = time.time() - generation_start
         print(
@@ -274,7 +341,7 @@ def main() -> None:
     track = Track(width=1200, height=800)
 
     if args.load_path:
-        run_watch_mode(track, args.load_path, args.show_sensors)
+        run_watch_mode(track, args.load_path, args.show_sensors, args.hidden_sizes)
     else:
         run_training(args)
 

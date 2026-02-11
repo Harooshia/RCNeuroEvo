@@ -5,14 +5,91 @@ from __future__ import annotations
 import argparse
 import os
 import time
+import tkinter as tk
 
 import numpy as np
-import pygame
 import tensorflow as tf
 
+from .car import Car
 from .genetic_algorithm import GeneticAlgorithm
 from .neural_network import NeuralNetwork
 from .track import Track
+
+
+class TkRenderer:
+    """Simple Tkinter-based 2D renderer for track and cars."""
+
+    def __init__(self, width: int, height: int, title: str = "Neuroevolution Racing") -> None:
+        self.root = tk.Tk()
+        self.root.title(title)
+        self.running = True
+        self.root.protocol("WM_DELETE_WINDOW", self._close)
+        self.canvas = tk.Canvas(self.root, width=width, height=height, bg="#0f0f14", highlightthickness=0)
+        self.canvas.pack()
+
+    def _close(self) -> None:
+        self.running = False
+        self.root.destroy()
+
+    @staticmethod
+    def _flatten_points(points: list[tuple[float, float]]) -> list[float]:
+        flat = []
+        for x, y in points:
+            flat.extend([x, y])
+        return flat
+
+    def draw_scene(
+        self,
+        track: Track,
+        cars: list[Car],
+        generation: int,
+        step: int,
+        alive: int,
+        pop_size: int,
+        best_fitness: float,
+        global_best: float,
+        speed: int,
+        show_sensors: bool,
+        best_car: Car | None,
+    ) -> None:
+        self.canvas.delete("all")
+
+        # Track surfaces.
+        self.canvas.create_polygon(
+            *self._flatten_points(track.outer_points), fill="#787878", outline="#787878", width=2
+        )
+        self.canvas.create_polygon(
+            *self._flatten_points(track.inner_points), fill="#0f0f14", outline="#0f0f14", width=2
+        )
+
+        # Checkpoints.
+        for cp in track.checkpoints:
+            self.canvas.create_line(cp.start[0], cp.start[1], cp.end[0], cp.end[1], fill="#3a3a55", width=1)
+
+        # Cars.
+        for car in cars:
+            if not car.alive:
+                continue
+            fill = "#ffdc32" if (best_car is car) else "#32b4fa"
+            self.canvas.create_polygon(*self._flatten_points(car.polygon_points()), fill=fill, outline=fill)
+
+        if show_sensors and best_car is not None and best_car.alive:
+            for start, end in best_car.sensor_lines(track):
+                self.canvas.create_line(start[0], start[1], end[0], end[1], fill="#ff6464", width=1)
+
+        overlay = [
+            f"Gen: {generation}",
+            f"Step: {step}",
+            f"Alive: {alive}/{pop_size}",
+            f"Best fitness: {best_fitness:.1f}",
+            f"Global best: {global_best:.1f}" if global_best > -np.inf else "Global best: N/A",
+            f"Speed x{speed}",
+        ]
+        for idx, line in enumerate(overlay):
+            self.canvas.create_text(16, 16 + idx * 22, text=line, fill="#f5f5f5", anchor="nw", font=("Consolas", 13))
+
+        self.root.update_idletasks()
+        self.root.update()
 
 
 def parse_args() -> argparse.Namespace:
@@ -35,60 +112,45 @@ def setup_seed(seed: int) -> None:
 
 
 def run_watch_mode(track: Track, weight_path: str, show_sensors: bool) -> None:
-    """Load one model and run it alone for demonstration."""
-    pygame.init()
-    screen = pygame.display.set_mode((track.width, track.height))
-    clock = pygame.time.Clock()
-    font = pygame.font.SysFont("consolas", 20)
+    renderer = TkRenderer(track.width, track.height, title="Neuroevolution Racing (Watch)")
 
-    input_size = 8  # 7 sensors + speed
+    input_size = 8
     net = NeuralNetwork(input_size=input_size)
     net.load_weights(weight_path)
 
-    from .car import Car
-
     car = Car(x=float(track.start_position[0]), y=float(track.start_position[1]), angle=track.start_angle)
-    running = True
 
-    while running:
-        for event in pygame.event.get():
-            if event.type == pygame.QUIT:
-                running = False
-
+    step = 0
+    while renderer.running:
         if car.alive:
             state = car.get_network_input(track)
             steer, throttle = net.predict_action(state)
             car.step(steer, throttle, track)
 
-        track.draw(screen)
-        car.draw(screen, track, best=True, draw_sensors=show_sensors)
-        status = "ALIVE" if car.alive else "CRASHED"
-        text = font.render(f"WATCH MODE | Fitness: {car.fitness:.1f} | {status}", True, (240, 240, 240))
-        screen.blit(text, (15, 12))
-        pygame.display.flip()
-        clock.tick(60)
-
-    pygame.quit()
+        renderer.draw_scene(
+            track=track,
+            cars=[car],
+            generation=0,
+            step=step,
+            alive=1 if car.alive else 0,
+            pop_size=1,
+            best_fitness=car.fitness,
+            global_best=car.fitness,
+            speed=1,
+            show_sensors=show_sensors,
+            best_car=car,
+        )
+        step += 1
+        time.sleep(1 / 60)
 
 
 def run_training(args: argparse.Namespace) -> None:
-    if not args.no_render:
-        pygame.init()
-        screen = pygame.display.set_mode((1200, 800))
-        pygame.display.set_caption("Neuroevolution Racing")
-        clock = pygame.time.Clock()
-        font = pygame.font.SysFont("consolas", 20)
-    else:
-        screen = None
-        clock = None
-        font = None
+    renderer = None if args.no_render else TkRenderer(1200, 800)
 
     track = Track(width=1200, height=800)
-    input_size = 8
-
     ga = GeneticAlgorithm(
         population_size=args.population,
-        input_size=input_size,
+        input_size=8,
         start_x=float(track.start_position[0]),
         start_y=float(track.start_position[1]),
         start_angle=track.start_angle,
@@ -106,68 +168,55 @@ def run_training(args: argparse.Namespace) -> None:
         generation_start = time.time()
 
         for step in range(args.max_steps):
-            if not args.no_render:
-                for event in pygame.event.get():
-                    if event.type == pygame.QUIT:
-                        pygame.quit()
-                        return
+            if renderer is not None and not renderer.running:
+                return
 
             for _ in range(args.speed):
                 ga.step_population(track)
                 if ga.living_count() == 0:
                     break
 
-            if not args.no_render and screen is not None and font is not None:
-                track.draw(screen)
-                best = ga.best_genome()
-                for genome in ga.genomes:
-                    genome.car.draw(
-                        screen,
-                        track,
-                        best=(genome is best),
-                        draw_sensors=(args.show_sensors and genome is best),
-                    )
-
-                overlay = [
-                    f"Gen: {gen}",
-                    f"Step: {step}",
-                    f"Alive: {ga.living_count()}/{args.population}",
-                    f"Best fitness: {best.fitness:.1f}",
-                    f"Global best: {global_best:.1f}" if global_best > -np.inf else "Global best: N/A",
-                    f"Speed x{args.speed}",
-                ]
-                for i, text in enumerate(overlay):
-                    surf = font.render(text, True, (245, 245, 245))
-                    screen.blit(surf, (16, 12 + i * 24))
-
-                pygame.display.flip()
-                clock.tick(60)
+            if renderer is not None:
+                best_genome = ga.best_genome()
+                renderer.draw_scene(
+                    track=track,
+                    cars=[g.car for g in ga.genomes],
+                    generation=gen,
+                    step=step,
+                    alive=ga.living_count(),
+                    pop_size=args.population,
+                    best_fitness=best_genome.fitness,
+                    global_best=global_best,
+                    speed=args.speed,
+                    show_sensors=args.show_sensors,
+                    best_car=best_genome.car,
+                )
+                time.sleep(1 / 60)
 
             if ga.living_count() == 0:
                 break
 
         stats = ga.evolve()
         global_best = max(global_best, stats["best_fitness"])
-        if ga.save_best(args.save_path):
-            pass
+        ga.save_best(args.save_path)
 
         elapsed = time.time() - generation_start
         print(
             f"Generation {gen:03d} | Best: {stats['best_fitness']:.2f} | "
-            f"Elite Avg: {stats['avg_fitness']:.2f} | "
-            f"Alive end: {ga.living_count()} | Time: {elapsed:.2f}s"
+            f"Elite Avg: {stats['avg_fitness']:.2f} | Time: {elapsed:.2f}s"
         )
 
-    if not args.no_render:
-        pygame.quit()
+
+def main() -> None:
+    args = parse_args()
+    setup_seed(args.seed)
+    track = Track(width=1200, height=800)
+
+    if args.load_path:
+        run_watch_mode(track, args.load_path, args.show_sensors)
+    else:
+        run_training(args)
 
 
 if __name__ == "__main__":
-    cli_args = parse_args()
-    setup_seed(cli_args.seed)
-    track_obj = Track(width=1200, height=800)
-
-    if cli_args.load_path:
-        run_watch_mode(track_obj, cli_args.load_path, cli_args.show_sensors)
-    else:
-        run_training(cli_args)
+    main()
